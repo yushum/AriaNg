@@ -1,10 +1,14 @@
 (function () {
     'use strict';
 
-    angular.module('ariaNg').controller('AriaNgDebugController', ['$rootScope', '$scope', '$location', '$interval', '$timeout', 'ariaNgConstants', 'ariaNgCommonService', 'ariaNgLocalizationService', 'ariaNgLogService', 'ariaNgSettingService', function ($rootScope, $scope, $location, $interval, $timeout, ariaNgConstants, ariaNgCommonService, ariaNgLocalizationService, ariaNgLogService, ariaNgSettingService) {
+    angular.module('ariaNg').controller('AriaNgDebugController', ['$rootScope', '$scope', '$location', '$interval', '$timeout', '$filter', 'ariaNgConstants', 'ariaNgCommonService', 'ariaNgLocalizationService', 'ariaNgLogService', 'ariaNgKeyboardService', 'ariaNgSettingService', 'aria2RpcService', function ($rootScope, $scope, $location, $interval, $timeout, $filter, ariaNgConstants, ariaNgCommonService, ariaNgLocalizationService, ariaNgLogService, ariaNgKeyboardService, ariaNgSettingService, aria2RpcService) {
         var tabStatusItems = [
             {
                 name: 'logs',
+                show: true
+            },
+            {
+                name: 'rpc',
                 show: true
             }
         ];
@@ -22,15 +26,52 @@
             return items;
         };
 
+        var getAria2RPCMethods = function () {
+            var rpcMethods = [];
+
+            for (var field in aria2RpcService) {
+                if (!aria2RpcService.hasOwnProperty(field) || !angular.isFunction(aria2RpcService[field])) {
+                    continue;
+                }
+
+                var func = aria2RpcService[field];
+                var funcCode = func.toString();
+
+                if (funcCode.indexOf('return invoke(') < 0) {
+                    continue;
+                }
+
+                try {
+                    var requestContext = aria2RpcService[field]({}, true);
+
+                    if (requestContext.methodName) {
+                        rpcMethods.push({
+                            aria2MethodName: requestContext.methodName,
+                            serviceMethodName: field,
+                            fullServiceMethodName: 'aria2RpcService.' + field
+                        });
+                    }
+                } catch (ex) {
+                    ariaNgLogService.warn('[AriaNgDebugController.getAria2RPCMethods] failed to execute aria2RpcService method: ' + field, ex);
+                }
+            }
+
+            return rpcMethods;
+        };
+
         $scope.context = {
             currentTab: 'logs',
             logMaxCount: ariaNgConstants.cachedDebugLogsLimit,
             logAutoRefreshAvailableInterval: ariaNgCommonService.getTimeOptions([100, 200, 500, 1000, 2000], true),
-            logAutoRefreshInterval: 0,
+            logAutoRefreshInterval: 1000,
             logListDisplayOrder: 'time:desc',
             logLevelFilter: 'DEBUG',
             logs: [],
-            currentLog: null
+            currentLog: null,
+            availableRpcMethods: getAria2RPCMethods(),
+            rpcRequestMethod: '',
+            rpcRequestParameters: '{}',
+            rpcResponse: null
         };
 
         $scope.enableDebugMode = function () {
@@ -123,6 +164,60 @@
             $scope.context.currentLog = null;
         });
 
+        $scope.executeAria2Method = function () {
+            if (!aria2RpcService[$scope.context.rpcRequestMethod]) {
+                ariaNgCommonService.showError('RPC method is illegal!');
+                return;
+            }
+
+            var context = {
+                silent: false,
+                callback: function (response) {
+                    if (response) {
+                        $scope.context.rpcResponse = $filter('json')(response.data);
+                    } else {
+                        $scope.context.rpcResponse = $filter('json')(response);
+                    }
+                }
+            };
+
+            var parameters = {};
+
+            try {
+                parameters = angular.fromJson($scope.context.rpcRequestParameters);
+            } catch (ex) {
+                ariaNgLogService.error('[AriaNgDebugController.executeAria2Method] failed to parse request parameters: ' + $scope.context.rpcRequestParameters, ex);
+                ariaNgCommonService.showError('RPC request parameters are invalid!');
+                return;
+            }
+
+            for (var key in parameters) {
+                if (!parameters.hasOwnProperty(key) || key === 'silent' || key === 'callback') {
+                    continue;
+                }
+
+                context[key] = parameters[key];
+            }
+
+            return aria2RpcService[$scope.context.rpcRequestMethod](context);
+        };
+
+        $scope.requestParametersTextboxKeyDown = function (event) {
+            if (!ariaNgSettingService.getKeyboardShortcuts()) {
+                return;
+            }
+
+            if (ariaNgKeyboardService.isCtrlEnterPressed(event) && $scope.executeMethodForm.$valid) {
+                if (event.preventDefault) {
+                    event.preventDefault();
+                }
+
+                $scope.executeAria2Method();
+
+                return false;
+            }
+        };
+
         $scope.$on('$destroy', function () {
             if (debugLogRefreshPromise) {
                 $interval.cancel(debugLogRefreshPromise);
@@ -163,7 +258,7 @@
                 return;
             }
 
-            $scope.reloadLogs();
+            $scope.setAutoRefreshInterval($scope.context.logAutoRefreshInterval);
         }, 100);
     }]);
 }());
